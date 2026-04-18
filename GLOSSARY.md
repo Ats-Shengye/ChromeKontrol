@@ -61,12 +61,21 @@ updated: 2026-03-29
 | --- | --- |
 | ネットワーク分離 | WebSocket / HTTP ともに `127.0.0.1` にのみバインド |
 | Origin 検証 | WebSocket ハンドシェイク時に localhost 限定ホワイトリストで検証 |
+| CSRF トークン認証 | HTTP API リクエストに `X-ChromeKontrol-Token` ヘッダーを必須化。`secrets.compare_digest()` でタイミング攻撃対策。環境変数 `CHROME_KONTROL_TOKEN` で固定可能（未設定時はランダム生成） |
+| Content-Type 強制 | `Content-Type: application/json` を必須化し CORS preflight を強制。simple request による CSRF 攻撃を防止 |
 | コマンドホワイトリスト | `get_dom` / `click` / `get_elements` のみ受付 |
 | セレクタ長制限 | CSS セレクタ 512 文字上限 |
-| ブラウザ名制限 | `chrome` / `edge` / `unknown` のホワイトリストで制限 |
+| ブラウザ名制限 | `chrome` / `edge` のホワイトリストで制限 |
 | メッセージサイズ制限 | 受信 5 MiB 上限でメモリ枯渇防止（GHSA-6g87-ff9q-v847 対策） |
 | ログインジェクション防止 | ASCII / Unicode 制御文字を除去してログ出力 |
 | コードインジェクション防止 | コマンド引数は関数パラメータとして渡し、文字列結合を回避 |
 | HTTP ヘッダー制限 | 8 KiB 上限 + 10秒デッドライン |
 | 並行リクエスト直列化 | `asyncio.Lock` でレスポンス混入を防止 |
 | レスポンスヘッダー | `Cache-Control: no-store` + `X-Content-Type-Options: nosniff` |
+
+## HTTP_AUTH_HEADER_NAME
+
+| 定数 | 値 | 説明 |
+| --- | --- | --- |
+| `HTTP_AUTH_HEADER_NAME` | `X-ChromeKontrol-Token` | HTTP API CSRF 対策トークンのヘッダー名。`secrets.compare_digest()` で検証。値はログに記録しない |
+| `REQUIRED_CONTENT_TYPE` | `application/json` | HTTP API の必須 Content-Type。CORS preflight を強制するために検証 |

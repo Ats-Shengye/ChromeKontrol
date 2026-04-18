@@ -28,7 +28,10 @@ Related    : background.js (client), manifest.json
   - 受信HTTPおよびWebSocketコマンドの構造バリデーションを実施する。
   - 同時HTTPリクエストはasyncio.Lockで直列化し、同時呼び出し間の
     レスポンスの混在を防止する。
-  - 機密データはログに記録しない。
+  - HTTPリクエストにはX-ChromeKontrol-Tokenヘッダーによるトークン認証を必須とする。
+    CSRFのsimple request（preflight不要）攻撃を防止する。
+  - HTTPリクエストにはContent-Type: application/jsonを必須とし、CORS preflightを強制する。
+  - 機密データはログに記録しない。トークン値はログ・エラーレスポンスに含めない。
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import sys
 import unicodedata
 from typing import Any
@@ -87,7 +91,7 @@ MAX_SELECTOR_LENGTH: int = 512
 # このサーバーが受け付けるブラウザ名。identifyメッセージの "browser" フィールドが
 # このセットに含まれない場合は拒否し、予期しないクライアントが任意の名前で
 # 登録するのを防ぐ。
-ALLOWED_BROWSERS: frozenset[str] = frozenset({'chrome', 'edge', 'unknown'})
+ALLOWED_BROWSERS: frozenset[str] = frozenset({'chrome', 'edge'})
 
 # ローカル以外の接続を防ぐための許可済みlocalhostオリジン値。
 ALLOWED_ORIGINS: frozenset[str] = frozenset({
@@ -96,6 +100,16 @@ ALLOWED_ORIGINS: frozenset[str] = frozenset({
     'ws://127.0.0.1',
 })
 # 注: 'null' オリジン（file:// ページ由来）は _is_allowed_origin() で明示的に拒否する。
+
+# CSRF対策: HTTPリクエスト認証に使用するカスタムヘッダー名。
+# ブラウザのsimple request判定（preflightなし）を回避するため、
+# カスタムヘッダーを必須とする。これによりCORS preflightが強制される。
+# セキュリティ注記: ヘッダー名はログに記録してよいが、ヘッダー値（トークン）は絶対に記録しない。
+HTTP_AUTH_HEADER_NAME: str = 'X-ChromeKontrol-Token'
+
+# CSRF対策: Content-Type検証。application/json以外を拒否することで
+# CORS preflightを強制し、simple requestによる攻撃を防止する。
+REQUIRED_CONTENT_TYPE: str = 'application/json'
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +204,7 @@ def _is_allowed_origin(headers: Any) -> bool:
         return True
     # Chrome/Edge拡張機能のオリジンを許可する。サーバーは127.0.0.1にのみ
     # バインドしているため、ローカルの拡張機能だけがこのポートに到達できる。
-    if origin.startswith('chrome-extension://') or origin.startswith('extension://'):
+    if origin.startswith('chrome-extension://'):
         return True
     allowed_lower = {o.lower() for o in ALLOWED_ORIGINS if o != 'null'}
     return origin in allowed_lower
@@ -605,6 +619,7 @@ async def _handle_http_request(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     kontrol: ChromeKontrolServer,
+    auth_token: str,
 ) -> None:
     """サーブモードで単一のHTTPリクエストを処理する。
 
@@ -621,13 +636,20 @@ async def _handle_http_request(
       - ボディサイズはMAX_MESSAGE_BYTESで制限し、メモリ枯渇を防止する。
       - asyncio.StreamWriterはfinallyブロックで必ず閉じ、fdリークを防ぐ。
       - _validate_commandはWebSocket呼び出し元と同じホワイトリストを再利用する。
+      - CSRF対策: X-ChromeKontrol-Tokenヘッダーをsecrets.compare_digestで検証する。
+        タイミング攻撃を防ぐため文字列の等値比較（==）は使用しない。
+      - CSRF対策: Content-Type: application/jsonを必須とし、CORS preflightを強制する。
+      - トークン値はログおよびエラーレスポンスに含めない（ヘッダー名のみ言及可）。
+      - 401応答は欠落・不一致を区別しない（列挙攻撃対策）。
 
     Args:
         reader: 受信接続用の非同期バイトリーダー。
         writer: レスポンス用の非同期バイトライター。
         kontrol: 共有のChromeKontrolServerインスタンス（WSクライアント参照を保持）。
+        auth_token: 起動時に生成または環境変数から取得したCSRF対策トークン。
     """
-    peer = writer.get_extra_info('peername', ('?', '?'))
+    peer_info = writer.get_extra_info('peername')
+    peer = f'{peer_info[0]}:{peer_info[1]}' if peer_info else '?'
     logger.debug('HTTP request from %s', _sanitise_for_log(peer))
 
     try:
@@ -666,20 +688,55 @@ async def _handle_http_request(
             await _write_http_error(writer, 405, 'Method Not Allowed')
             return
 
-        # Content-Lengthを抽出する。
-        content_length: int | None = None
+        # リクエストヘッダーを小文字名でdictに収集する（重複は後勝ち）。
+        # Content-Length・Content-Type・認証トークンをここで一括取得する。
+        headers: dict[str, str] = {}
         for line in lines[1:]:
-            name, _, value = line.partition(':')
-            if name.strip().lower() == 'content-length':
-                try:
-                    content_length = int(value.strip())
-                    if content_length < 0:
-                        await _write_http_error(writer, 400, 'Bad Request: negative Content-Length')
-                        return
-                except ValueError:
-                    await _write_http_error(writer, 400, 'Bad Request: invalid Content-Length')
+            name, sep, value = line.partition(':')
+            if sep:
+                headers[name.strip().lower()] = value.strip()
+
+        # CSRF対策: X-ChromeKontrol-Tokenヘッダーを検証する。
+        # secrets.compare_digestでタイミング攻撃を防ぐ。
+        # 欠落・不一致ともに同一メッセージで返し、列挙攻撃を防止する。
+        # セキュリティ注記: トークン値はログに記録しない。
+        request_token = headers.get(HTTP_AUTH_HEADER_NAME.lower(), '')
+        if not secrets.compare_digest(request_token, auth_token):
+            logger.warning(
+                'HTTP request rejected: missing or invalid %s header from %s',
+                HTTP_AUTH_HEADER_NAME,
+                _sanitise_for_log(peer),
+            )
+            await _write_http_error(writer, 401, 'Unauthorized')
+            return
+
+        # CSRF対策: Content-Type検証。application/json以外を拒否し、
+        # CORS preflightを強制することでsimple requestによる攻撃を防止する。
+        content_type_raw = headers.get('content-type', '')
+        # media-typeのみ比較（; charset=utf-8 等のパラメータを除外）。
+        content_type_media = content_type_raw.split(';')[0].strip().lower()
+        if content_type_media != REQUIRED_CONTENT_TYPE:
+            logger.warning(
+                'HTTP request rejected: Content-Type must be %r, got %r from %s',
+                REQUIRED_CONTENT_TYPE,
+                _sanitise_for_log(content_type_raw),
+                _sanitise_for_log(peer),
+            )
+            await _write_http_error(writer, 415, 'Unsupported Media Type')
+            return
+
+        # Content-Lengthを取得・バリデーションする。
+        content_length: int | None = None
+        raw_cl = headers.get('content-length')
+        if raw_cl is not None:
+            try:
+                content_length = int(raw_cl)
+                if content_length < 0:
+                    await _write_http_error(writer, 400, 'Bad Request: negative Content-Length')
                     return
-                break
+            except ValueError:
+                await _write_http_error(writer, 400, 'Bad Request: invalid Content-Length')
+                return
 
         if content_length is None:
             await _write_http_error(writer, 411, 'Length Required')
@@ -748,9 +805,11 @@ async def _write_http_response(writer: asyncio.StreamWriter, status: int, body: 
         status: HTTPステータスコード。
         body: UTF-8エンコードされたJSONボディバイト。
     """
-    reason = {200: 'OK', 400: 'Bad Request', 405: 'Method Not Allowed',
-              408: 'Request Timeout', 411: 'Length Required',
-              413: 'Request Entity Too Large', 431: 'Request Header Fields Too Large'}.get(status, 'Unknown')
+    reason = {200: 'OK', 400: 'Bad Request', 401: 'Unauthorized',
+              405: 'Method Not Allowed', 408: 'Request Timeout',
+              411: 'Length Required', 413: 'Request Entity Too Large',
+              415: 'Unsupported Media Type',
+              431: 'Request Header Fields Too Large'}.get(status, 'Unknown')
     response = (
         f'HTTP/1.1 {status} {reason}\r\n'
         f'Content-Type: application/json\r\n'
@@ -799,6 +858,14 @@ async def run_serve_mode(ws_port: int, http_port: int) -> None:
     """
     kontrol = ChromeKontrolServer()
 
+    # CSRF対策トークンを生成する。
+    # 環境変数 CHROME_KONTROL_TOKEN が設定されている場合はそれを使用し、
+    # 常駐起動時のトークン固定を可能にする（~/.bashrc等への記載を想定）。
+    # 未設定の場合は secrets.token_urlsafe(32) で暗号論的に安全なトークンを生成する。
+    # セキュリティ注記: トークン値はstderrにのみ出力する（ローカルプロセスログ、外部に出ない）。
+    env_token = os.environ.get('CHROME_KONTROL_TOKEN', '')
+    auth_token: str = env_token if env_token else secrets.token_urlsafe(32)
+
     ws_server = await websockets.server.serve(
         kontrol.handle_connection,
         host=BIND_HOST,
@@ -808,9 +875,9 @@ async def run_serve_mode(ws_port: int, http_port: int) -> None:
     )
     logger.info('ChromeKontrol WebSocket listening on %s:%d', BIND_HOST, ws_port)
 
-    # クロージャがkontrolをキャプチャし、各接続が同じサーバー状態を共有するようにする。
+    # クロージャがkontrolとauth_tokenをキャプチャし、各接続が同じ状態を共有するようにする。
     async def _http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await _handle_http_request(reader, writer, kontrol)
+        await _handle_http_request(reader, writer, kontrol, auth_token)
 
     http_server = await asyncio.start_server(
         _http_handler,
@@ -818,12 +885,18 @@ async def run_serve_mode(ws_port: int, http_port: int) -> None:
         port=http_port,
     )
     logger.info('ChromeKontrol HTTP API listening on %s:%d', BIND_HOST, http_port)
+    logger.info('Auth token: %s', auth_token)
     logger.info(
         'Ready. Send commands with: '
-        'curl -s %s:%d -d \'{"cmd":"get_dom"}\' '
+        'TOKEN=%s; curl -s %s:%d '
+        '-H "%s: $TOKEN" '
+        '-H "Content-Type: application/json" '
+        '-d \'{"cmd":"get_dom"}\' '
         '(multi-browser: add "browser":"chrome" or "browser":"edge")',
+        auth_token,
         BIND_HOST,
         http_port,
+        HTTP_AUTH_HEADER_NAME,
     )
 
     ping_task = asyncio.create_task(kontrol.run_ping_loop())
@@ -986,11 +1059,14 @@ def main() -> None:
 
     使用方法（サーブモード）:
         python3 server.py --serve [--port PORT] [--http-port PORT]
-        curl -s localhost:9766 -d '{"cmd":"get_dom","browser":"chrome"}'
+        TOKEN=$(python3 server.py --serve 2>&1 | grep 'Auth token' | awk '{print $NF}')
+        curl -s localhost:9766 -H "X-ChromeKontrol-Token: $TOKEN" \
+          -H "Content-Type: application/json" -d '{"cmd":"get_dom","browser":"chrome"}'
 
     環境変数:
         CHROME_KONTROL_PORT       デフォルトのWebSocketポート（9765）を上書きする。
         CHROME_KONTROL_HTTP_PORT  デフォルトのHTTP APIポート（9766）を上書きする。
+        CHROME_KONTROL_TOKEN      HTTP API認証トークンを固定する（省略時は起動ごとにランダム生成）。
     """
     _configure_logging()
 

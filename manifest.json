@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChromeKontrol",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "WebSocket経由でDOMアクセスと要素操作を行う軽量Chrome拡張機能。",
 
   "permissions": [

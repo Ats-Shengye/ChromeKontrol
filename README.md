@@ -1,16 +1,16 @@
 # ChromeKontrol
 
-デバッグモードなし、自動化バナーなし、検知リスクなし。CLIからブラウザを操作する軽量拡張。
+個人用途の軽量Chrome/Edge MV3拡張機能。CLIからローカルブラウザのDOMを操作します。CDP（Chrome DevTools Protocol）や `chrome.debugger` ではなく `chrome.scripting.executeScript` を使用するため、デバッグバナーや自動化通知を表示せず動作します。
 
-ChromeKontrol は Chrome/Edge 拡張機能 + Python サーバーの構成で、WebSocket経由でCLIツールからブラウザのDOMを操作できます。CDP や `chrome.debugger` ではなく `chrome.scripting.executeScript` を使用するため、ブラウザにデバッグモードの痕跡が一切残りません。
+> **用途**: 開発・個人用途のローカルブラウザ制御を想定。Anti-bot検知回避や、スクレイピング検出回避を目的とした使用は意図していません。
 
-## なぜ CDP じゃダメなのか
+## 動作経路の比較（Chromium系のみ）
 
-| 手法 | デバッグバナー | `navigator.webdriver` | Anti-bot検知リスク |
-|------|:---:|:---:|:---:|
-| CDP（Puppeteer, Playwright） | 出る | 出る | 高 |
-| `chrome.debugger` API | 出る | 出ない | 中 |
-| **ChromeKontrol**（`chrome.scripting`） | **出ない** | **出ない** | **なし** |
+| 手法 | デバッグバナー | `navigator.webdriver` |
+|------|:---:|:---:|
+| CDP（Puppeteer, Playwright） | 出る | 出る |
+| `chrome.debugger` API | 出る | 出ない |
+| **ChromeKontrol**（`chrome.scripting`） | **出ない** | **出ない** |
 
 ## 対応ブラウザ
 
@@ -18,7 +18,7 @@ ChromeKontrol は Chrome/Edge 拡張機能 + Python サーバーの構成で、W
 - Edge（MV3）
 - マルチブラウザ: 両方同時に接続し、コマンドごとに対象を指定可能
 
-Firefox は非対応です（Manifest V3 / Chromium 拡張機能 API に依存）。
+Firefox 用は別リポジトリ（[FirefoxKontrol](https://github.com/Ats-Shengye/FirefoxKontrol)）。
 
 ## クイックスタート
 
@@ -58,15 +58,32 @@ echo '{"cmd":"get_dom"}' | python3 server.py
 python3 server.py --serve
 ```
 
-HTTP経由でコマンドを送信:
+起動時にstderrへ認証トークンが表示されます。HTTP APIへのアクセスには`X-ChromeKontrol-Token`ヘッダーと`Content-Type: application/json`が必須です（CSRF対策）:
 
 ```bash
+# トークンを固定したい場合（~/.bashrc等に追加）
+export CHROME_KONTROL_TOKEN=your_fixed_token_here
+
+# サーバー起動
+python3 server.py --serve
+
+# 別ターミナルでコマンド送信（TOKEN は起動時のstderr出力から取得）
+TOKEN=<起動時に表示されたトークン>
+
 # 単一ブラウザ
-curl -s 127.0.0.1:9766 -d '{"cmd":"get_dom"}'
+curl -s 127.0.0.1:9766 \
+  -H "X-ChromeKontrol-Token: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd":"get_dom"}'
 
 # ブラウザ指定
-curl -s 127.0.0.1:9766 -d '{"cmd":"get_elements","selector":"a","browser":"edge"}'
+curl -s 127.0.0.1:9766 \
+  -H "X-ChromeKontrol-Token: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd":"get_elements","selector":"a","browser":"edge"}'
 ```
+
+> **破壊的変更**: 認証ヘッダーなし、またはContent-Typeが`application/json`以外のリクエストはそれぞれ`401 Unauthorized` / `415 Unsupported Media Type`を返します。既存のcurlスクリプトへのヘッダー追加が必要です。
 
 ## AIコーディングアシスタントとの連携
 
@@ -92,6 +109,7 @@ CLI（stdin / curl） → server.py（WebSocket + HTTP） → 拡張機能（Ser
 |-----------|----------|---------|-----------|
 | WebSocket ポート | `--port` | `CHROME_KONTROL_PORT` | 9765 |
 | HTTP API ポート | `--http-port` | `CHROME_KONTROL_HTTP_PORT` | 9766 |
+| HTTP API 認証トークン | なし | `CHROME_KONTROL_TOKEN` | 起動ごとにランダム生成 |
 
 ## ライセンス
 
