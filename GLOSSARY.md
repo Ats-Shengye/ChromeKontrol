@@ -72,6 +72,8 @@ updated: 2026-03-29
 | HTTP ヘッダー制限 | 8 KiB 上限 + 10秒デッドライン |
 | 並行リクエスト直列化 | `asyncio.Lock` でレスポンス混入を防止 |
 | レスポンスヘッダー | `Cache-Control: no-store` + `X-Content-Type-Options: nosniff` |
+| トークン強度警告（M-7） | 環境変数 `CHROME_KONTROL_TOKEN` を `.strip()` してから空判定。空白のみのトークンはランダム生成にフォールバック。32文字未満は `logger.warning` を出すが拒否しない（ユーザー指定値を採用） |
+| identify重複拒否（H-3） | 同一 `browser_name` で既存接続が生きている（`not old_client.closed`）場合は後着を code=1008 で拒否。既存接続が stale（`.closed == True`）の場合のみ置換を許可する（拡張機能再読み込みの正当ケースを維持） |
 
 ## HTTP_AUTH_HEADER_NAME
 
