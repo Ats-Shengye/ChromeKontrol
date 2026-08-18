@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.DS_Store
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+
+# ローカル専用: 環境固有の診断レポート（実アカウント名・用途を含むため公開しない）
+ISSUES.md
+
+# gitleaks local config (contains absolute paths)
+.gitleaks.toml

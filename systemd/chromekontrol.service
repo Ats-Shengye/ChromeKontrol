@@ -1,0 +1,29 @@
+[Unit]
+Description=ChromeKontrol server (WebSocket + HTTP API)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/ドキュメント/Code/ChromeKontrol
+ExecStart=%h/ドキュメント/Code/ChromeKontrol/.venv/bin/python server.py --serve
+Restart=always
+RestartSec=5
+
+# 停止時にサーバープロセスのみを終了させ、子プロセスは巻き込まない。
+# 既定の control-group では cgroup 内の全プロセスに SIGTERM が送られるため、
+# プロファイル自動起動（autoLaunch）で開いたブラウザがサーバーの子プロセスと
+# して cgroup 内に入り、systemctl restart のたびにブラウザごと落ちてしまう。
+# ブラウザの寿命管理は ChromeKontrol の責務ではないため、orphan にして
+# systemd --user の subreaper に委ねる。
+KillMode=process
+
+# セキュリティハードニング
+# setuid バイナリ経由の特権昇格経路を塞ぐ。server.py は subprocess.Popen() で
+# ブラウザプロセスを起動するため（プロファイル自動起動機能）、起動された
+# ブラウザが setuid バイナリ経由で特権を獲得する経路を実際に塞いでいる。
+# ProtectSystem / PrivateTmp 等は user unit では特権不足で機能しないため、
+# NoNewPrivileges が user unit で有効な実質唯一のハードニング指定になる。
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

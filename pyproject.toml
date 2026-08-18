@@ -1,0 +1,120 @@
+[project]
+name = "chromekontrol"
+version = "0.1.0"
+description = "Local WebSocket/HTTP bridge between CLI tools and the ChromeKontrol browser extension."
+requires-python = ">=3.12"
+dependencies = [
+    "websockets==10.4",
+]
+
+# Design Decision: This project ships a single top-level script (server.py),
+# not an installable library. `package = false` tells uv to manage the
+# virtual environment and dependency lockfile without trying to build/install
+# this project itself as a distributable package (there is no src/ layout or
+# build backend, and none is needed for Phase 0's testing goal).
+[tool.uv]
+package = false
+
+# Dev-only tooling. Kept separate from the production `dependencies` above so
+# that `requirements.txt` (used by end users cloning the repo) never gains a
+# test/formatting dependency by mistake.
+#
+# Version floors below encode the CVE check performed before adding these
+# dependencies (Coding.md Phase 1.5 / OSV lookup, 2026-07-25):
+#   - pytest      >=9.0.3 avoids CVE-2025-71176 (GHSA-6w46-j5rx-g56g, tmpdir handling).
+#   - black       >=26.3.1 avoids CVE-2026-32274 (GHSA-3936-cmfr-pm3m, arbitrary file
+#                 write via --python-cell-magics). This project never passes that
+#                 option, so exposure was already minimal; pinned above the fix anyway
+#                 since there is no cost to doing so.
+#   - pytest-asyncio, pytest-cov: no known vulnerabilities at time of check (OSV query
+#                 returned zero results for both).
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "black>=26.3.1",
+    "mypy>=1.19.1",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# Design Decision: server.py lives at the project root with no src/ layout.
+# Adding "." to pythonpath (rather than relying on rootdir auto-insertion,
+# which is invocation-order-dependent) guarantees `import server` resolves
+# the same way regardless of the cwd pytest is invoked from.
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "--strict-markers"
+
+[tool.black]
+line-length = 120
+skip-string-normalization = true
+target-version = ["py312"]
+# server.py は black の管理対象から外す。既存コードは black とは異なる整形
+# （frozenset({...}) を直接インデントする等）で書かれており、2000行超を
+# 一括整形すると差分がレビュー不能な規模になる。ruff の line-length 120 と
+# lint ルールは server.py にも適用しているため、書式の一貫性は担保されている。
+# ここで除外することで、`black .` でも `black server.py` のような明示指定でも
+# server.py は変更されず、誤整形（実際に一度発生している）を構造的に防ぐ。
+# extend-exclude ではなく force-exclude を使う理由: extend-exclude はファイル
+# 探索時のフィルタでしかなく、コマンドラインで明示指定されたパスには適用され
+# ないため、`black server.py` を防げない。
+force-exclude = '''
+/(
+  server\.py
+)$
+'''
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F/W: pycodestyle + pyflakes core rules.
+# I: import sorting.
+# B: flake8-bugbear (common footguns).
+# S: flake8-bandit rules bundled into ruff (Coding.md notes potential overlap
+#    with standalone bandit; both are run per Pre-Submission Checklist).
+select = ["E", "F", "W", "I", "B", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test doubles intentionally use fixed, non-secret strings that look like
+# tokens/passwords to the S105/S106 heuristics, and `assert` is the standard
+# pytest idiom (S101). None of these apply to production code (server.py).
+"tests/*.py" = ["S101", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["server.py", "tests"]
+
+[tool.coverage.run]
+source = ["server"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+# Design Decision: These four functions plus the CLI bootstrap guard are the
+# process entry points explicitly excluded from Phase 0 scope (ISSUES.md
+# "テスト対象外": main(), run_server(), run_serve_mode(), run_ping_loop()).
+# They bind real sockets or run unbounded loops, which is out of scope for
+# unit tests per the task brief. `_configure_logging` is excluded alongside
+# them because it mutates global logging handlers as a side effect and is
+# only ever invoked from main(); calling it from tests would leak duplicate
+# StreamHandlers onto the root logger across the test session.
+#
+# These patterns match against server.py's unmodified source text (server.py
+# itself must not be edited per Phase 0 constraints); coverage.py excludes
+# the entire function body when the pattern matches the line introducing it.
+exclude_also = [
+    "def _configure_logging\\(\\) -> None:",
+    "async def run_server\\(port: int\\) -> None:",
+    "async def run_serve_mode\\(ws_port: int, http_port: int\\) -> None:",
+    "async def run_ping_loop\\(self, interval: float = 20\\.0\\) -> None:",
+    "def main\\(\\) -> None:",
+    "if __name__ == .__main__.:",
+]
